@@ -1,6 +1,6 @@
 {
   "name": "@particle-academy/prism-perplexity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Perplexity's search, embeddings and Agent API for TypeScript.",
   "type": "module",
   "sideEffects": false,
