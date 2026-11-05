@@ -24,6 +24,8 @@ interface CorpusCase {
   id: string;
   title: string;
   http_status: number;
+  operation?: 'retrieve' | 'cancel' | 'create';
+  project_incomplete_reason?: boolean;
   body: unknown;
   parsed: {
     php: Record<string, unknown>;
@@ -47,7 +49,9 @@ async function parse(entry: CorpusCase): Promise<Record<string, unknown>> {
   }));
 
   try {
-    const response = await client.retrieve('resp_probe');
+    const response = await (entry.operation === 'cancel'
+      ? client.cancel('resp_probe')
+      : entry.operation === 'create' ? client.create('synthetic') : client.retrieve('resp_probe'));
 
     return {
       refused: false,
@@ -62,6 +66,7 @@ async function parse(entry: CorpusCase): Promise<Record<string, unknown>> {
       usage: response.usage,
       error: response.error,
       text: response.text(),
+      ...(entry.project_incomplete_reason ? { incomplete_reason: response.incompleteReason() } : {}),
     };
   } catch (thrown) {
     const error = thrown as PerplexityError;
@@ -74,7 +79,7 @@ const caseOf = (id: string): CorpusCase => corpus.cases.find((entry) => entry.id
 
 describe('the cross-language agent-response corpus', () => {
   it('is the whole suite, not a subset someone trimmed to green', () => {
-    expect(corpus.cases).toHaveLength(17);
+    expect(corpus.cases).toHaveLength(45);
   });
 
   it.each(corpus.cases)('$id parses the way the corpus recorded ($title)', async (entry) => {

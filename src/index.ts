@@ -201,6 +201,7 @@ export type AgentStatus =
   | 'completed'
   | 'failed'
   | 'incomplete'
+  | 'cancelling'
   | 'cancelled';
 
 const TERMINAL: readonly AgentStatus[] = ['completed', 'failed', 'incomplete', 'cancelled'];
@@ -234,6 +235,12 @@ export class AgentResponse {
 
   isSuccessful(): boolean {
     return this.status === 'completed';
+  }
+
+  /** Why the run stopped early, such as max_output_tokens; null when not provided. */
+  incompleteReason(): string | null {
+    const details = this.raw.incomplete_details;
+    return isJsonObject(details) && typeof details.reason === 'string' ? details.reason : null;
   }
 
   /** Every text part of the output, joined. */
@@ -284,7 +291,7 @@ export class AgentClient {
   }
 
   async cancel(id: string): Promise<AgentResponse> {
-    return this.#map({ method: 'POST', path: `/v1/agent/${encodeURIComponent(id)}/cancel` });
+    return this.#map({ method: 'POST', path: `/v1/agent/${encodeURIComponent(id)}/cancel` }, id);
   }
 
   /**
@@ -319,7 +326,7 @@ export class AgentClient {
     );
   }
 
-  async #map(request: HttpRequest): Promise<AgentResponse> {
+  async #map(request: HttpRequest, cancellationId?: string): Promise<AgentResponse> {
     const { status, json } = await this.http(request);
 
     if (!isJsonObject(json)) {
@@ -342,13 +349,24 @@ export class AgentClient {
       );
     }
 
-    const id = json.id;
+    // Cancel returns an acknowledgement with response_id, not a full snapshot.
+    // A present malformed value must fail; id is only a legacy fallback when absent.
+    const id = cancellationId !== undefined && Object.hasOwn(json, 'response_id') ? json.response_id : json.id;
     const agentStatus = json.status;
 
     if (typeof id !== 'string' || id === '' || !isAgentStatus(agentStatus)) {
       throw new PerplexityError(
         'invalid_response',
         'The Agent API response is missing a recognized status or response id.',
+        null,
+        status,
+      );
+    }
+
+    if (cancellationId !== undefined && id !== cancellationId) {
+      throw new PerplexityError(
+        'invalid_response',
+        'The cancellation acknowledgement identifies a different run. Cancellation state is uncertain. Use retrieve() with the requested ID to check its state.',
         null,
         status,
       );
@@ -392,7 +410,7 @@ export class AgentClient {
 function isAgentStatus(value: unknown): value is AgentStatus {
   return (
     typeof value === 'string' &&
-    ['queued', 'in_progress', 'completed', 'failed', 'incomplete', 'cancelled'].includes(value)
+    ['queued', 'in_progress', 'completed', 'failed', 'incomplete', 'cancelling', 'cancelled'].includes(value)
   );
 }
 
