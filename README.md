@@ -51,6 +51,16 @@ isTerminal(latest.status);
 const finished = await agent.wait(started.id);
 ```
 
+`cancel(id)` acknowledges a request: `cancelling` is neither terminal nor successful.
+The acknowledgement's `response_id` (or legacy `id`, only when `response_id` is absent)
+must match the requested ID exactly. A malformed or mismatched acknowledgement raises
+`invalid_response`; cancellation state is uncertain, so call `retrieve(id)` to check it.
+The client does not retry cancellation automatically. `create()` and `retrieve()` still
+use their own `id` field, and `raw` retains the provider body.
+
+`AgentResponse.incompleteReason()` returns the string `incomplete_details.reason`,
+including an empty string, or `null` when absent or malformed.
+
 `isTerminal()` is exported as a function rather than left as a status
 comparison, because "which statuses mean stop" is the one thing a caller
 writing their own loop gets wrong — and getting it wrong means either polling
@@ -70,7 +80,8 @@ a span, or a model's context.
 
 Request shaping, the error codes and the terminal-status set are compared
 against the PHP reference and the Python port by prism-parity's perplexity
-corpus. Be aware of where that stands: when it was written, **one of its
-seventeen rows agreed** across the three languages. The gaps are G-29 through
+corpus. **One of its forty-five rows agrees** across all three languages; the
+TypeScript and Python outputs agree on all forty-five. The original seventeen
+rows are unchanged. The gaps are G-29 through
 G-32 in the envelope's port-gaps register — read it before assuming a response
 from this port is interchangeable with one from PHP.
