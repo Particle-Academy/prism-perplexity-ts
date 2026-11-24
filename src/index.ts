@@ -66,7 +66,17 @@ export interface HttpResponse {
  */
 export type HttpClient = (request: HttpRequest) => Promise<HttpResponse>;
 
-/** A transport over `fetch`, for a caller who does not want to write one. */
+/** How many redirects one call follows before it gives up. */
+const MAX_REDIRECTS = 10;
+
+/**
+ * A transport over `fetch`, for a caller who does not want to write one.
+ *
+ * A redirect is followed only while scheme, host and port stay the same. Any
+ * other redirect is not followed, and the call throws `provider_error` with
+ * the redirect's status. Each hop is compared with the one before it, so a
+ * chain never leaves the origin it started on.
+ */
 export function fetchTransport(options: {
   apiKey: string;
   baseUrl?: string;
@@ -74,16 +84,47 @@ export function fetchTransport(options: {
 }): HttpClient {
   const baseUrl = (options.baseUrl ?? 'https://api.perplexity.ai').replace(/\/$/, '');
   const doFetch = options.fetch ?? globalThis.fetch;
+  const headers = {
+    Authorization: `Bearer ${options.apiKey}`,
+    'Content-Type': 'application/json',
+  };
 
   return async (request) => {
-    const response = await doFetch(`${baseUrl}${request.path}`, {
-      method: request.method,
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: request.body === undefined ? undefined : JSON.stringify(request.body),
-    });
+    let url = `${baseUrl}${request.path}`;
+    let method: string = request.method;
+    let body = request.body === undefined ? undefined : JSON.stringify(request.body);
+    let response: Response;
+
+    for (let hop = 0; ; hop++) {
+      response = await doFetch(url, { method, headers, body, redirect: 'manual' });
+
+      // A browser's fetch hides a manual redirect behind an opaque response.
+      if (response.type === 'opaqueredirect') throw redirectNotFollowed(null);
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+
+      const next = nextUrl(url, response.headers?.get('location') ?? null);
+      if (next === null || hop >= MAX_REDIRECTS) break;
+
+      // The redirect's own body is not read; release it before the next hop.
+      await response.body?.cancel().catch(() => {});
+
+      // The method and body change exactly as `fetch` itself would change them.
+      if (
+        response.status === 303 ||
+        ((response.status === 301 || response.status === 302) && method === 'POST')
+      ) {
+        method = 'GET';
+        body = undefined;
+      }
+      url = next;
+    }
+
+    // A redirect that reaches here was not followed. Its body is not an answer
+    // to the request, so it is never handed to the caller as one.
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {});
+      throw redirectNotFollowed(response.status);
+    }
 
     // A non-JSON body is reported as null rather than thrown here, so the
     // caller below can raise `unreadable_response` with the status attached —
@@ -97,6 +138,28 @@ export function fetchTransport(options: {
 
     return { status: response.status, json };
   };
+}
+
+/** The next hop, or null when `location` is missing or leaves the origin of `current`. */
+function nextUrl(current: string, location: string | null): string | null {
+  if (location === null) return null;
+  try {
+    const from = new URL(current);
+    const to = new URL(location, from);
+    if (from.origin === 'null' || to.origin !== from.origin) return null;
+    return to.href;
+  } catch {
+    return null;
+  }
+}
+
+function redirectNotFollowed(status: number | null): PerplexityError {
+  return new PerplexityError(
+    'provider_error',
+    'The endpoint answered with a redirect that was not followed.',
+    null,
+    status,
+  );
 }
 
 // -- search ------------------------------------------------------------------
