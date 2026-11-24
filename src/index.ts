@@ -75,7 +75,15 @@ const MAX_REDIRECTS = 10;
  * A redirect is followed only while scheme, host and port stay the same. Any
  * other redirect is not followed, and the call throws `provider_error` with
  * the redirect's status. Each hop is compared with the one before it, so a
- * chain never leaves the origin it started on.
+ * chain never leaves the origin it started on. A `Location` carrying a user name
+ * or password is not followed either.
+ *
+ * A custom `fetch` MUST honour `redirect: 'manual'` and hand each redirect back
+ * unfollowed: that is the only way this transport can check where a request
+ * goes. A response that says it was redirected anyway, or that comes from
+ * another origin than the one requested, is refused with `provider_error` and
+ * its body is never returned. By then the custom fetch has already sent the
+ * request on, which this transport cannot undo.
  */
 export function fetchTransport(options: {
   apiKey: string;
@@ -100,6 +108,11 @@ export function fetchTransport(options: {
 
       // A browser's fetch hides a manual redirect behind an opaque response.
       if (response.type === 'opaqueredirect') throw redirectNotFollowed(null);
+      // A fetch that followed a redirect itself bypassed the check below.
+      if (followedElsewhere(url, response)) {
+        await response.body?.cancel().catch(() => {});
+        throw redirectNotFollowed(null);
+      }
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
 
       const next = nextUrl(url, response.headers?.get('location') ?? null);
@@ -147,9 +160,22 @@ function nextUrl(current: string, location: string | null): string | null {
     const from = new URL(current);
     const to = new URL(location, from);
     if (from.origin === 'null' || to.origin !== from.origin) return null;
+    // fetch refuses a URL with credentials, and they are not the endpoint's to set.
+    if (to.username !== '' || to.password !== '') return null;
     return to.href;
   } catch {
     return null;
+  }
+}
+
+/** True when `response` did not come from `requested`: the fetch followed a redirect. */
+function followedElsewhere(requested: string, response: Response): boolean {
+  if (response.redirected === true) return true;
+  if (typeof response.url !== 'string' || response.url === '') return false;
+  try {
+    return new URL(response.url).origin !== new URL(requested).origin;
+  } catch {
+    return true;
   }
 }
 

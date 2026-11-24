@@ -27,6 +27,14 @@ const vectors = await embeddings(http, {
 });
 ```
 
+`fetchTransport()` follows a redirect only while scheme, host and port stay the
+same, and never to a `Location` carrying a user name or password; any other
+redirect throws `PerplexityError` with code `provider_error`. If you pass your
+own `fetch`, it must honour `redirect: 'manual'` and return each redirect
+unfollowed. A response that was redirected anyway, or that comes from another
+origin, is refused with `provider_error`, but by then your fetch has already
+sent the request on.
+
 `search()` takes a single query or an array of them. A failure throws
 `PerplexityError`, whose `code` names what went wrong rather than leaving you to
 parse a message.
