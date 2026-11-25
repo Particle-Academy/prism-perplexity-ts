@@ -79,11 +79,17 @@ const MAX_REDIRECTS = 10;
  * or password is not followed either.
  *
  * A custom `fetch` MUST honour `redirect: 'manual'` and hand each redirect back
- * unfollowed: that is the only way this transport can check where a request
- * goes. A response that says it was redirected anyway, or that comes from
- * another origin than the one requested, is refused with `provider_error` and
- * its body is never returned. By then the custom fetch has already sent the
- * request on, which this transport cannot undo.
+ * unfollowed, and MUST return the `Response` it received rather than a rebuilt
+ * one. Where a response came from is read only from its `url` and `redirected`
+ * fields, so from a custom `fetch` the transport refuses, with `provider_error`
+ * and without returning the body:
+ *  - a response with `redirected` set;
+ *  - a response whose `url` is of another origin than the one requested;
+ *  - a response with no `url` at all (a rebuilt `Response` has an empty one),
+ *    because its origin cannot be checked.
+ * A rebuilt response that sets a forged `url` cannot be detected. By the time a
+ * response is refused the custom fetch has already sent the request on, which
+ * this transport cannot undo.
  */
 export function fetchTransport(options: {
   apiKey: string;
@@ -109,7 +115,7 @@ export function fetchTransport(options: {
       // A browser's fetch hides a manual redirect behind an opaque response.
       if (response.type === 'opaqueredirect') throw redirectNotFollowed(null);
       // A fetch that followed a redirect itself bypassed the check below.
-      if (followedElsewhere(url, response)) {
+      if (followedElsewhere(url, response, options.fetch !== undefined)) {
         await response.body?.cancel().catch(() => {});
         throw redirectNotFollowed(null);
       }
@@ -168,10 +174,14 @@ function nextUrl(current: string, location: string | null): string | null {
   }
 }
 
-/** True when `response` did not come from `requested`: the fetch followed a redirect. */
-function followedElsewhere(requested: string, response: Response): boolean {
+/**
+ * True when `response` did not come from `requested`, or when that cannot be
+ * told. A real fetch always reports the url it answered from, so a custom
+ * fetch's response without one was rebuilt and is refused.
+ */
+function followedElsewhere(requested: string, response: Response, custom: boolean): boolean {
   if (response.redirected === true) return true;
-  if (typeof response.url !== 'string' || response.url === '') return false;
+  if (typeof response.url !== 'string' || response.url === '') return custom;
   try {
     return new URL(response.url).origin !== new URL(requested).origin;
   } catch {
