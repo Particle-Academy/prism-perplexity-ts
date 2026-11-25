@@ -328,6 +328,47 @@ describe('a custom fetch that follows redirects itself', () => {
     expect(error.code).toBe('provider_error');
   });
 
+  it('is refused when it rebuilds the response, so where it came from is unknown', async () => {
+    const endpoint = await server('127.0.0.1');
+    const other = await server('127.0.0.2');
+    endpoint.redirect = [307, `${other.url}/landed/search`];
+    other.landed = { results: [{ url: 'https://substituted.test' }] };
+
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: async (input, init) => {
+        const followed = await fetch(input, { ...init, redirect: 'follow' });
+        // A rebuilt Response reports url '' and redirected false.
+        return new Response(await followed.text(), { status: followed.status, headers: followed.headers });
+      },
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+    expect(error.message).not.toContain('127.0.0.2');
+  });
+
+  it('is refused when it rebuilds a response that was never redirected', async () => {
+    // No url means the transport cannot check the origin, so it fails closed.
+    const endpoint = await server('127.0.0.1');
+    endpoint.landed = { results: [{ url: 'https://example.test' }] };
+
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: async (input, init) => {
+        const real = await fetch(input, init);
+        return new Response(await real.text(), { status: real.status, headers: real.headers });
+      },
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+  });
+
   it('that honours a manual redirect still works', async () => {
     const endpoint = await server('127.0.0.1');
     endpoint.landed = { results: [{ url: 'https://example.test' }] };
