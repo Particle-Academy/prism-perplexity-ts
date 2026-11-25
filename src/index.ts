@@ -83,10 +83,12 @@ const MAX_REDIRECTS = 10;
  * one. Where a response came from is read only from its `url` and `redirected`
  * fields, so from a custom `fetch` the transport refuses, with `provider_error`
  * and without returning the body:
- *  - a response with `redirected` set;
+ *  - a response with `redirected` set (any truthy value);
  *  - a response whose `url` is of another origin than the one requested;
- *  - a response with no `url` at all (a rebuilt `Response` has an empty one),
- *    because its origin cannot be checked.
+ *  - a response with no `url` string at all (a rebuilt `Response` has an empty
+ *    one), because its origin cannot be checked. This refusal says so, and
+ *    keeps the response's status;
+ *  - a response whose `status`, `url` or `redirected` cannot be read.
  * A rebuilt response that sets a forged `url` cannot be detected. By the time a
  * response is refused the custom fetch has already sent the request on, which
  * this transport cannot undo.
@@ -109,29 +111,31 @@ export function fetchTransport(options: {
     let body = request.body === undefined ? undefined : JSON.stringify(request.body);
     let response: Response;
 
+    let status: number;
+
     for (let hop = 0; ; hop++) {
       response = await doFetch(url, { method, headers, body, redirect: 'manual' });
+      const meta = readMeta(response);
 
       // A browser's fetch hides a manual redirect behind an opaque response.
-      if (response.type === 'opaqueredirect') throw redirectNotFollowed(null);
+      if (meta.type === 'opaqueredirect') throw redirectNotFollowed(null);
       // A fetch that followed a redirect itself bypassed the check below.
-      if (followedElsewhere(url, response, options.fetch !== undefined)) {
-        await response.body?.cancel().catch(() => {});
-        throw redirectNotFollowed(null);
+      const origin = checkOrigin(url, meta, options.fetch !== undefined);
+      if (origin !== 'same') {
+        await release(response);
+        throw origin === 'unknown' ? noUrl(meta.status) : redirectNotFollowed(null);
       }
-      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      status = meta.status;
+      if (![301, 302, 303, 307, 308].includes(status)) break;
 
-      const next = nextUrl(url, response.headers?.get('location') ?? null);
+      const next = nextUrl(url, locationOf(response));
       if (next === null || hop >= MAX_REDIRECTS) break;
 
       // The redirect's own body is not read; release it before the next hop.
-      await response.body?.cancel().catch(() => {});
+      await release(response);
 
       // The method and body change exactly as `fetch` itself would change them.
-      if (
-        response.status === 303 ||
-        ((response.status === 301 || response.status === 302) && method === 'POST')
-      ) {
+      if (status === 303 || ((status === 301 || status === 302) && method === 'POST')) {
         method = 'GET';
         body = undefined;
       }
@@ -140,9 +144,9 @@ export function fetchTransport(options: {
 
     // A redirect that reaches here was not followed. Its body is not an answer
     // to the request, so it is never handed to the caller as one.
-    if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel().catch(() => {});
-      throw redirectNotFollowed(response.status);
+    if (status >= 300 && status < 400) {
+      await release(response);
+      throw redirectNotFollowed(status);
     }
 
     // A non-JSON body is reported as null rather than thrown here, so the
@@ -155,7 +159,7 @@ export function fetchTransport(options: {
       json = null;
     }
 
-    return { status: response.status, json };
+    return { status, json };
   };
 }
 
@@ -174,19 +178,80 @@ function nextUrl(current: string, location: string | null): string | null {
   }
 }
 
+interface ResponseMeta {
+  type: unknown;
+  redirected: unknown;
+  url: unknown;
+  status: number;
+}
+
 /**
- * True when `response` did not come from `requested`, or when that cannot be
- * told. A real fetch always reports the url it answered from, so a custom
- * fetch's response without one was rebuilt and is refused.
+ * The fields of `response` the checks below read, each read once. A custom
+ * fetch can return any object, so a field that cannot be read, or a status
+ * that is not a number, is refused rather than allowed to escape as some
+ * other error.
  */
-function followedElsewhere(requested: string, response: Response, custom: boolean): boolean {
-  if (response.redirected === true) return true;
-  if (typeof response.url !== 'string' || response.url === '') return custom;
+function readMeta(response: Response): ResponseMeta {
   try {
-    return new URL(response.url).origin !== new URL(requested).origin;
+    const meta = {
+      type: response.type,
+      redirected: response.redirected,
+      url: response.url,
+      status: response.status,
+    };
+    if (typeof meta.status !== 'number') throw new TypeError('status is not a number');
+    return meta;
   } catch {
-    return true;
+    throw new PerplexityError(
+      'provider_error',
+      'The fetch returned a response whose status, url or redirected field could not be read.',
+    );
   }
+}
+
+/**
+ * 'other' when the response did not come from `requested`; 'unknown' when a
+ * custom fetch's response has no url to tell by. A real fetch always reports
+ * the url it answered from, so a custom fetch's response without one was
+ * rebuilt and is refused. Any truthy `redirected` counts, not only `true`.
+ */
+function checkOrigin(requested: string, meta: ResponseMeta, custom: boolean): 'same' | 'other' | 'unknown' {
+  if (meta.redirected) return 'other';
+  if (typeof meta.url !== 'string' || meta.url === '') return custom ? 'unknown' : 'same';
+  try {
+    return new URL(meta.url).origin === new URL(requested).origin ? 'same' : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+/** The redirect's `Location`, or null when there is none or it cannot be read. */
+function locationOf(response: Response): string | null {
+  try {
+    const location: unknown = response.headers?.get('location');
+    return typeof location === 'string' ? location : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Releases a body that will not be read, whatever kind of object holds it. */
+async function release(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Nothing to release, or it cannot be; either way it is not read.
+  }
+}
+
+function noUrl(status: number): PerplexityError {
+  return new PerplexityError(
+    'provider_error',
+    'The custom fetch returned a response without a url, so where it came from cannot be checked. ' +
+      'Return the Response that fetch gave you rather than a rebuilt one.',
+    null,
+    status,
+  );
 }
 
 function redirectNotFollowed(status: number | null): PerplexityError {

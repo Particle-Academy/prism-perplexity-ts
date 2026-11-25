@@ -34,10 +34,18 @@ own `fetch`, it must honour `redirect: 'manual'`, return each redirect
 unfollowed, and return the `Response` it received rather than a rebuilt one.
 The transport can only read where a response came from through its `url` and
 `redirected` fields. From a custom `fetch` it refuses, with `provider_error`, a
-response marked `redirected`, a response whose `url` is of another origin, and
-a response with no `url` (which is what a rebuilt `Response` has). A rebuilt
+response marked `redirected`, a response whose `url` is of another origin, a
+response whose `url`, `redirected` or `status` cannot be read, and a response
+with no `url` string (which is what a rebuilt `Response` has). A rebuilt
 response with a forged `url` cannot be detected, and by the time a response is
 refused your fetch has already sent the request on.
+
+**A custom `fetch` must return a `Response` with `url` set.** A logging, retry
+or caching wrapper that returns `new Response(text, init)`, or a test double
+that returns a plain object without `url`, has every call refused. That error
+says the `url` is missing, and keeps the response's `status`, so a 401 still
+reads as a 401. Return the `Response` that `fetch` gave you (or, in a test
+double, set `url` to the requested url).
 
 `search()` takes a single query or an array of them. A failure throws
 `PerplexityError`, whose `code` names what went wrong rather than leaving you to
