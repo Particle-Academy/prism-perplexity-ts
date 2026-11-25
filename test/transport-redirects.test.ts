@@ -229,6 +229,111 @@ describe('a same-origin redirect', () => {
     const error = await failure(() => search(http, 'prism'));
 
     expect(error.status).toBe(302);
-    expect(endpoint.seen.length).toBeLessThanOrEqual(21);
+    // The first request plus ten redirects followed, and no more.
+    expect(endpoint.seen).toHaveLength(11);
+  });
+
+  it('is checked on every hop, so a chain cannot leave the origin', async () => {
+    const endpoint = await server('127.0.0.1');
+    const other = await server('127.0.0.2');
+    endpoint.redirect = [302, '/hop'];
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: (input, init) => {
+        // The second hop points at another origin.
+        if (String(input).endsWith('/hop')) endpoint.redirect = [307, `${other.url}/elsewhere`];
+        return fetch(input, init);
+      },
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.status).toBe(307);
+    expect(endpoint.seen.map((s) => s.path)).toEqual(['/search', '/hop']);
+    expect(other.connections).toBe(0);
+  });
+});
+
+describe('a redirect whose location carries a user name or password', () => {
+  for (const userinfo of ['u:p@', 'u@', ':p@']) {
+    it(`is not followed (${userinfo})`, async () => {
+      const endpoint = await server('127.0.0.1');
+      endpoint.redirect = [302, `http://${userinfo}127.0.0.1:${endpoint.port}/landed/search`];
+
+      const error = await failure(() => search(fetchTransport({ apiKey: KEY, baseUrl: endpoint.url }), 'prism'));
+
+      expect(error.code).toBe('provider_error');
+      expect(error.status).toBe(302);
+      expect(error.message).not.toContain(userinfo);
+      expect(error.message).not.toContain('127.0.0.1');
+      expect(endpoint.seen).toHaveLength(1);
+    });
+  }
+});
+
+describe('a custom fetch that follows redirects itself', () => {
+  it("does not have the other origin's answer returned", async () => {
+    const endpoint = await server('127.0.0.1');
+    const other = await server('127.0.0.2');
+    endpoint.redirect = [307, `${other.url}/landed/search`];
+    other.landed = { results: [{ url: 'https://substituted.test' }] };
+
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: (input, init) => fetch(input, { ...init, redirect: 'follow' }),
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+    expect(error.message).not.toContain('127.0.0.2');
+  });
+
+  it('is refused even when it does not report that it redirected', async () => {
+    const endpoint = await server('127.0.0.1');
+    const other = await server('127.0.0.2');
+    endpoint.redirect = [307, `${other.url}/landed/search`];
+    other.landed = { results: [{ url: 'https://substituted.test' }] };
+
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: async (input, init) => {
+        const response = await fetch(input, { ...init, redirect: 'follow' });
+        Object.defineProperty(response, 'redirected', { value: false });
+        return response;
+      },
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+  });
+
+  it('is refused when it followed a redirect on the same origin', async () => {
+    const endpoint = await server('127.0.0.1');
+    endpoint.redirect = [302, `${endpoint.url}/landed/search`];
+    endpoint.landed = { results: [{ url: 'https://example.test' }] };
+
+    const http = fetchTransport({
+      apiKey: KEY,
+      baseUrl: endpoint.url,
+      fetch: (input, init) => fetch(input, { ...init, redirect: 'follow' }),
+    });
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+  });
+
+  it('that honours a manual redirect still works', async () => {
+    const endpoint = await server('127.0.0.1');
+    endpoint.landed = { results: [{ url: 'https://example.test' }] };
+
+    const http = fetchTransport({ apiKey: KEY, baseUrl: endpoint.url, fetch: (input, init) => fetch(input, init) });
+
+    expect(await search(http, 'prism')).toEqual([{ url: 'https://example.test' }]);
   });
 });
