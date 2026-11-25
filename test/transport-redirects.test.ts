@@ -378,3 +378,135 @@ describe('a custom fetch that follows redirects itself', () => {
     expect(await search(http, 'prism')).toEqual([{ url: 'https://example.test' }]);
   });
 });
+
+describe("a custom fetch's response metadata", () => {
+  // These fetches never touch the network: each returns a response object
+  // directly, as a test double or a logging/retry wrapper would.
+  const BASE = 'http://127.0.0.1:9';
+  const REQUESTED = `${BASE}/search`;
+
+  function transport(reply: () => unknown) {
+    return fetchTransport({
+      apiKey: KEY,
+      baseUrl: BASE,
+      fetch: (async () => reply()) as unknown as typeof globalThis.fetch,
+    });
+  }
+
+  function plain(fields: Record<string, unknown>) {
+    return {
+      type: 'basic',
+      redirected: false,
+      url: REQUESTED,
+      status: 200,
+      headers: new Headers(),
+      body: null,
+      json: async () => ({ results: [{ url: 'https://example.test' }] }),
+      ...fields,
+    };
+  }
+
+  it('without a url is refused with a message that names the missing url and keeps the status', async () => {
+    // A wrapper that rebuilds the endpoint's real 401: there was no redirect.
+    const http = transport(
+      () =>
+        new Response('{"error":{"message":"bad key","type":"auth"}}', {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+    expect(error.status).toBe(401);
+    expect(error.message).toContain('url');
+    expect(error.message).not.toContain('redirect that was not followed');
+  });
+
+  it('without a url keeps a success status too, and never returns the body', async () => {
+    const http = transport(() => new Response('{"results":[{"url":"https://example.test"}]}', { status: 200 }));
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+    expect(error.status).toBe(200);
+    expect(error.message).toContain('url');
+  });
+
+  it.each([
+    ['missing', { url: undefined }],
+    ['null', { url: null }],
+    ['empty', { url: '' }],
+    ['a number', { url: 42 }],
+    ['a URL object', { url: new URL(REQUESTED) }],
+  ])('with a url that is %s is refused as having no url', async (_label, fields) => {
+    const http = transport(() => plain({ status: 429, ...fields }));
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+    expect(error.status).toBe(429);
+    expect(error.message).toContain('url');
+    expect(error.message).not.toContain('redirect that was not followed');
+  });
+
+  it.each([
+    ['true', true],
+    ['1', 1],
+    ["'yes'", 'yes'],
+    ["'true'", 'true'],
+    ['an object', {}],
+  ])('marked redirected as %s is refused', async (_label, redirected) => {
+    const http = transport(() => plain({ redirected }));
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+  });
+
+  it.each([['url'], ['redirected'], ['type'], ['status'], ['headers']])(
+    'whose %s cannot be read is refused with a PerplexityError',
+    async (field) => {
+      const http = transport(() => {
+        const response = plain({ status: 302 });
+        Object.defineProperty(response, field, {
+          get() {
+            throw new Error('getter exploded');
+          },
+        });
+        return response;
+      });
+
+      const error = await failure(() => search(http, 'prism'));
+
+      expect(error.code).toBe('provider_error');
+      expect(error.message).not.toContain('getter exploded');
+    },
+  );
+
+  it('whose headers.get throws on a redirect is refused with a PerplexityError', async () => {
+    const http = transport(() =>
+      plain({
+        status: 302,
+        headers: {
+          get() {
+            throw new Error('getter exploded');
+          },
+        },
+      }),
+    );
+
+    const error = await failure(() => search(http, 'prism'));
+
+    expect(error.code).toBe('provider_error');
+  });
+
+  it('is accepted when it reports the requested url, which is the documented limit', async () => {
+    // Pins the README: a custom fetch that sets `url` to the requested url is
+    // trusted, because no transport can tell that url was forged.
+    const http = transport(() => plain({}));
+
+    expect(await search(http, 'prism')).toEqual([{ url: 'https://example.test' }]);
+  });
+});
