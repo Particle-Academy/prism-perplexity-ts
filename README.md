@@ -30,10 +30,14 @@ const vectors = await embeddings(http, {
 `fetchTransport()` follows a redirect only while scheme, host and port stay the
 same, and never to a `Location` carrying a user name or password; any other
 redirect throws `PerplexityError` with code `provider_error`. If you pass your
-own `fetch`, it must honour `redirect: 'manual'` and return each redirect
-unfollowed. A response that was redirected anyway, or that comes from another
-origin, is refused with `provider_error`, but by then your fetch has already
-sent the request on.
+own `fetch`, it must honour `redirect: 'manual'`, return each redirect
+unfollowed, and return the `Response` it received rather than a rebuilt one.
+The transport can only read where a response came from through its `url` and
+`redirected` fields. From a custom `fetch` it refuses, with `provider_error`, a
+response marked `redirected`, a response whose `url` is of another origin, and
+a response with no `url` (which is what a rebuilt `Response` has). A rebuilt
+response with a forged `url` cannot be detected, and by the time a response is
+refused your fetch has already sent the request on.
 
 `search()` takes a single query or an array of them. A failure throws
 `PerplexityError`, whose `code` names what went wrong rather than leaving you to

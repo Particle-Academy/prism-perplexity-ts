@@ -276,7 +276,7 @@ describe('fetchTransport', () => {
       fetch: (async (url: string, init: RequestInit) => {
         seen = { url, init };
 
-        return { json: async () => ({ results: [] }), status: 200 };
+        return { json: async () => ({ results: [] }), status: 200, url };
       }) as unknown as typeof globalThis.fetch,
     });
 
@@ -291,7 +291,8 @@ describe('fetchTransport', () => {
     // more use than a parse error with no context.
     const http = fetchTransport({
       apiKey: 'k',
-      fetch: (async () => ({
+      fetch: (async (url: string) => ({
+        url,
         status: 500,
         json: async () => {
           throw new Error('not json');
